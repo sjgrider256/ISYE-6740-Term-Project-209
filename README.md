@@ -1,2 +1,2 @@
-# ISYE-6040-Group-Project-Term-209
+# ISYE-6740-Term-Project-209
 Individual tree species classification using hyperspectral NEON data
