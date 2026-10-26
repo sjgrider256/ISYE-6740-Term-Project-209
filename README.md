@@ -1,6 +1,6 @@
 # ISYE-6740-Term-Project-209
 ### Individual tree species classification using hyperspectral NEON data
-Guide: https://www.neonscience.org/resources/learning-hub/tutorials/refl-classification-pyxarray
+Neon AOP & TOS Data Prep Guide: https://www.neonscience.org/resources/learning-hub/tutorials/refl-classification-pyxarray
 
 This project explores the use of machine learning for forest species classification using data from the National Ecological Observatory Network (NEON). Field-observed tree species from NEON's Terrestrial Observation System (TOS) are combined with hyperspectral imagery and LiDAR from the Airborne Observation Platform (AOP) to characterize individual canopy trees.
 
