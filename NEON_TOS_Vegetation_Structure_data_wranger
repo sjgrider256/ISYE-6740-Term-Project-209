@@ -1,0 +1,169 @@
+# this notebook has two parts:
+    #1: calculate GPS records for individual trees using stemDistance, stemAzimuth, and reference points (PointIDs).
+    #2: merge survey records of stems/braches on individualID(trees) with the highest live stem assigned to each tree. We will use this later to filter any trees that do not fall within 5m of the upper canopy using our Canopy Height Model. 
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import neonutilities as nu
+import numpy as np
+import pandas as pd
+import requests
+import seaborn as sns
+import time
+
+my_token = "XXXX"
+
+site_ID = "ORNL"
+
+# load vegetation structure data as dictionary
+veg_dict = nu.load_by_product(dpid="DP1.10098.001", 
+                              site=site_ID, 
+                              package="basic", 
+                              release="RELEASE-2024",
+                              token=my_token,
+                              check_size=False)
+
+# vst_mappingandtagging data contains info required to calculated coordinates for invidual trees
+veg_map_all = veg_dict["vst_mappingandtagging"]
+
+# remove invalid pointIDs (required to calculate coordinatesz)
+veg_map = veg_map_all.loc[veg_map_all["pointID"] != ""]
+
+#restructure
+veg_map = veg_map.reindex()
+
+# combine location and pointID for more detail
+veg_map["points"] = veg_map["namedLocation"] + "." + veg_map["pointID"]
+
+# create list of vegetation points
+veg_points = list(set(list(veg_map["points"])))
+
+# Loop through all of the points in veg_points to determine the easting and northing from the NEON Locations API. 
+easting = []
+northing = []
+coord_uncertainty = []
+elev_uncertainty = []
+drop_points = []
+for i in veg_points:
+    time.sleep(1) # helps avoid hitting the API rate limit
+    vres = requests.get("https://data.neonscience.org/api/v0/locations/"+i)
+    vres_json = vres.json()
+    # discard points that aren’t found in the location database
+    if vres_json["data"] is not None:      #in some cases, there may be points not found in location database
+        easting.append(vres_json["data"]["locationUtmEasting"])
+        northing.append(vres_json["data"]["locationUtmNorthing"])
+        props = pd.DataFrame.from_dict(vres_json["data"]["locationProperties"])
+        cu = props.loc[props["locationPropertyName"] == "Value for Coordinate uncertainty"]["locationPropertyValue"]
+        coord_uncertainty.append(cu[cu.index[0]])
+        eu = props.loc[props["locationPropertyName"] == "Value for Elevation uncertainty"]["locationPropertyValue"]
+        elev_uncertainty.append(eu[eu.index[0]])
+    else:
+        drop_points.append(i)
+
+veg_points_clean = [v for v in veg_points if v not in drop_points]
+
+# create a dataframe containing vegetation data.
+pt_dict = dict(points=veg_points_clean,
+              easting=easting,
+              northing=northing,
+              coordinateUncertainty=coord_uncertainty,
+              elevationUncertainty=elev_uncertainty)
+
+pt_df = pd.DataFrame.from_dict(pt_dict)
+pt_df.set_index("points", inplace = True)
+
+veg_map = veg_map.drop(columns=pt_df.columns, errors="ignore").join(pt_df, on="points", how="inner")
+            
+# use the stemDistance and stemAzimuth data to calculate the precise locations of individuals, relative to the reference locations (pointIDs)
+
+veg_map["adjEasting"] = (veg_map["easting"]
+                        + veg_map["stemDistance"]
+                        * np.sin(veg_map["stemAzimuth"]
+                                   * np.pi / 180))
+
+veg_map["adjNorthing"] = (veg_map["northing"]
+                        + veg_map["stemDistance"]
+                        * np.cos(veg_map["stemAzimuth"]
+                                   * np.pi / 180))
+
+veg_map["adjCoordinateUncertainty"] = veg_map["coordinateUncertainty"] + 0.6
+
+veg_map["adjElevationUncertainty"] = veg_map["elevationUncertainty"] + 1
+
+# select colomns
+map_columns = ["date", "individualID", "scientificName", "taxonID", "plotID", "pointID", "adjEasting", "adjNorthing"]
+veg_mapping = veg_map[map_columns].copy()
+
+# Now that we have precise GPS coordinates for each tree, we will merge stem recods from vst_apparentindividual which we can later use to filter trees whos highest stem height does not breech the upper canopy
+
+# Load vegetation measurements
+veg_structure = veg_dict["vst_apparentindividual"][["individualID", "eventID", "tempStemID", "date", "height", "growthForm", "canopyPosition", "plantStatus", "stemDiameter"]].copy()
+veg_structure["date"] = pd.to_datetime(veg_structure["date"], errors="coerce")
+veg_structure["height"] = pd.to_numeric(veg_structure["height"], errors="coerce")
+
+# Keep the most recent survey per for
+veg_structure["eventDate"] = veg_structure.groupby(["individualID", "eventID"])["date"].transform("max")
+veg_structure = veg_structure[veg_structure["eventDate"] == veg_structure.groupby("individualID")["eventDate"].transform("max")].copy()
+
+# Keep live stems with valid heights
+veg_structure = veg_structure[(veg_structure["plantStatus"] == "Live") & (veg_structure["height"] > 0)]
+#select tallest stem per individual
+veg_structure = veg_structure.sort_values(["height", "date"]).drop_duplicates("individualID", keep="last")
+#assign correct dates
+veg_structure = veg_structure.drop(columns="eventDate").rename(columns={"date": "measurementDate"})
+
+# Merge mapped trees with tallest living stems
+veg_map_structure = veg_mapping.merge(veg_structure, on="individualID", how="inner", validate="one_to_one").reset_index(drop=True)
+
+print("Mapped individuals:", len(veg_mapping))
+print("Individuals with valid live heights:", len(veg_structure))
+print("Matched trees:", len(veg_map_structure))
+
+#convert full sceintific name to genus
+veg_map_structure['genus'] = veg_map_structure['scientificName'].str.split().str[0]
+
+#genus abundance
+genus_df = veg_map_structure[['individualID','genus']].groupby(['genus']).count()
+genus_df.sort_values(by='individualID',ascending=False)
+
+#select top X amount
+top_amount = 15
+top_genus_df = genus_df.sort_values(by='individualID', ascending=False).head(top_amount)
+top_genus_list = top_genus_df.index.tolist()
+
+#filter dataframe by top genus
+veg_top_genus = veg_map_structure[veg_map_structure["genus"].isin(top_genus_list)]
+
+#save as csv
+veg_top_genus.to_csv("data/veg_structure_data_by_genus.csv",index=False)
+
+#plot tree genus in map view
+ax = sns.scatterplot(
+    data=veg_top_genus,
+    x='adjEasting',
+    y='adjNorthing',
+    hue='genus',
+)
+
+# Make the x and y dimensions are equal
+ax.set_aspect('equal', adjustable='box')
+
+# Remove scientific notation on the x and y axes labels
+ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.0f}'))
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0f}'))
+
+# Place the legend outside the plot at the center right
+plt.legend(loc='center left', bbox_to_anchor=(1.05, 0.5))
+
+# Adjust layout to prevent legend overlap
+plt.tight_layout()
+
+# Add title and axis labels
+ax.set_title("Tree Genus", fontsize=14)
+ax.set_xlabel("Easting (m)", fontsize=12)
+ax.set_ylabel("Northing (m)", fontsize=12)
+plt.yticks(fontsize=8)  
+plt.xticks(fontsize=8)  
+
+plt.show()
+
