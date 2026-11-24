@@ -1,4 +1,4 @@
-# Data processing and geospatial
+import os
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -7,7 +7,6 @@ import rasterio
 import h5py
 import xarray as xr
 
-# Machine learning
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -16,9 +15,19 @@ from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
 
-site_crs = 'EPSG:32616'
+#specify site (set by Run.py; defaults to ORNL when run standalone)
+site_ID = os.environ.get("NEON_SITE", "ORNL")
 
-trees_df = pd.read_csv('data/veg_structure_data_by_genus.csv')
+#read the site CRS off a downloaded CHM tile instead of hard coding it
+chm_files = sorted(Path('./data/chm').rglob(f'*_{site_ID}_*_CHM.tif'))
+if not chm_files:
+    raise SystemExit(f"ERROR: no CHM tiles for {site_ID} under data/chm. Run the download script first.")
+
+with rasterio.open(chm_files[0]) as src:
+    site_crs = src.crs.to_string()
+print(f"Site {site_ID} CRS: {site_crs}")
+
+trees_df = pd.read_csv(f'data/veg_structure_data_by_genus_{site_ID}.csv')
 
 trees_gdf = gpd.GeoDataFrame(trees_df, geometry=gpd.points_from_xy(trees_df['adjEasting'], trees_df['adjNorthing']), crs=site_crs)
 
@@ -33,9 +42,12 @@ trees_gdf = trees_gdf[np.isfinite(trees_gdf["pixel_easting"]) & np.isfinite(tree
 refl_folder = Path("data/refl")
 h5_files_2018 = []
 for file in refl_folder.rglob("*_reflectance.h5"):
-    if "2018" in file.parts:
+    if "2018" in file.parts and f"_{site_ID}_" in file.name:
         h5_files_2018.append(file)
 h5_files_2018.sort()
+
+if not h5_files_2018:
+    raise SystemExit(f"ERROR: no 2018 reflectance tiles for {site_ID} under data/refl. Run the download script first.")
 
 tile_files = []
 for file in h5_files_2018:
@@ -53,7 +65,6 @@ trees_gdf["tile_easting"] = (np.floor(trees_gdf["pixel_easting"] / 1000) * 1000)
 trees_gdf["tile_northing"] = (np.floor(trees_gdf["pixel_northing"] / 1000) * 1000).astype(int)
 
 #unique AOP tiles containing hemlocks
-
 
 tree_tiles = trees_gdf[
     ["tile_easting", "tile_northing"]
@@ -75,7 +86,6 @@ print("Tree tile files:", len(tree_tile_files))
 
 #filter branches under canopy
 
-chm_files = list(Path('./data/chm').rglob('*_CHM.tif'))
 trees_gdf['chm_height'] = np.nan
 
 total_tiles = len(tree_tile_files)
@@ -259,6 +269,11 @@ for i, (_, tile) in enumerate(tree_tile_files.iterrows(), start=1):
             'chm_height': tree['chm_height']
         })
 
+if not spectra:
+    raise SystemExit(
+        f"ERROR: No tree spectra extracted for {site_ID}."
+    )
+
 spectra = np.asarray(spectra)
 pixel_metadata = pd.DataFrame(pixel_metadata)
 
@@ -277,6 +292,28 @@ X = X[:, good_bands]
 filtered_wavelengths = neon_tile.coords["wavelengths"].values[good_bands]
 print("Remaining bands:", X.shape[1])
 
+# Remove genera with insufficient samples
+min_samples = 3
+
+genus_counts = pd.Series(y).value_counts()
+valid_genera = genus_counts[genus_counts >= min_samples].index
+
+print("\nExcluded genera:")
+print(genus_counts[genus_counts < min_samples])
+
+keep = np.isin(y, valid_genera)
+
+X = X[keep]
+y = y[keep]
+
+if len(np.unique(y)) < 3:
+    raise SystemExit(
+        f"ERROR: Fewer than 3 genera retained at {site_ID}."
+    )
+
+print("\nRetained samples per genus:")
+print(pd.Series(y).value_counts())
+
 #80/20 split
 X_train, X_test, y_train, y_test = train_test_split(
     X, y,
@@ -284,6 +321,11 @@ X_train, X_test, y_train, y_test = train_test_split(
     stratify=y,
     random_state=20
 )
+
+if set(y_train) != set(y) or set(y_test) != set(y):
+    raise SystemExit(
+        "ERROR: Not all genera represented in both datasets."
+    )
 
 print("Training samples:", len(y_train))
 print("Testing samples:", len(y_test))
@@ -363,6 +405,7 @@ for name, model in models.items():
                     "Accuracy": accuracy_score(y_test, pred), "ROC AUC (OvO)": overall_auc})
 
 results_df = pd.DataFrame(results)
-results_df.to_csv("data/NEON_ORNL_Genus_Classification_Results.csv", index=False, float_format="%.4f")
+output_csv = f"data/NEON_{site_ID}_Genus_Classification_Results.csv"
+results_df.to_csv(output_csv, index=False, float_format="%.4f")
 
-print("Saved: data/NEON_ORNL_Genus_Classification_Results.csv")
+print("Saved:", output_csv)

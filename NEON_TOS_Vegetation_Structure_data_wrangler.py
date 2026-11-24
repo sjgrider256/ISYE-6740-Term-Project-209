@@ -10,10 +10,12 @@ import pandas as pd
 import requests
 import seaborn as sns
 import time
+import os
 
-my_token = "XXXX"
+my_token = os.environ.get("NEON_TOKEN")
 
-site_ID = "ORNL"
+#specify site (set by Run.py; defaults to ORNL when run standalone)
+site_ID = os.environ.get("NEON_SITE", "ORNL")
 
 # load vegetation structure data as dictionary
 veg_dict = nu.load_by_product(dpid="DP1.10098.001", 
@@ -23,10 +25,10 @@ veg_dict = nu.load_by_product(dpid="DP1.10098.001",
                               token=my_token,
                               check_size=False)
 
-# vst_mappingandtagging data contains info required to calculated coordinates for invidual trees
+# vst_mappingandtagging data contains info required to calculate coordinates for individual trees
 veg_map_all = veg_dict["vst_mappingandtagging"]
 
-# remove invalid pointIDs (required to calculate coordinatesz)
+# remove invalid pointIDs (required to calculate coordinates)
 veg_map = veg_map_all.loc[veg_map_all["pointID"] != ""]
 
 #restructure
@@ -135,7 +137,7 @@ top_genus_list = top_genus_df.index.tolist()
 veg_top_genus = veg_map_structure[veg_map_structure["genus"].isin(top_genus_list)]
 
 #save as csv
-veg_top_genus.to_csv("data/veg_structure_data_by_genus.csv",index=False)
+veg_top_genus.to_csv(f"data/veg_structure_data_by_genus_{site_ID}.csv",index=False)
 
 #plot tree genus in map view
 ax = sns.scatterplot(
@@ -145,25 +147,21 @@ ax = sns.scatterplot(
     hue='genus',
 )
 
-# Make the x and y dimensions are equal
 ax.set_aspect('equal', adjustable='box')
 
-# Remove scientific notation on the x and y axes labels
 ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.0f}'))
 ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: f'{y:.0f}'))
 
-# Place the legend outside the plot at the center right
 plt.legend(loc='center left', bbox_to_anchor=(1.05, 0.5))
 
-# Adjust layout to prevent legend overlap
 plt.tight_layout()
 
-# Add title and axis labels
-ax.set_title("Tree Genus", fontsize=14)
+ax.set_title(f"Tree Genus - {site_ID}", fontsize=14)
 ax.set_xlabel("Easting (m)", fontsize=12)
 ax.set_ylabel("Northing (m)", fontsize=12)
 plt.yticks(fontsize=8)  
 plt.xticks(fontsize=8)  
 
-plt.show()
+plt.savefig(f"data/tree_genus_map_{site_ID}.png", dpi=150)
+plt.close()
 

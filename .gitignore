@@ -1,0 +1,9 @@
+# NEON API token - keep private
+data/neon_token.txt
+
+# Downloaded AOP tiles (large)
+data/refl/
+data/chm/
+
+__pycache__/
+*.pyc
